@@ -72,6 +72,19 @@ using namespace boost;
 	#define CURLINFO_RESPONSE_CODE CURLINFO_HTTP_CODE
 #endif
 
+typedef CURLU CurlUrl;
+
+inline bool curl_url_is_https(CurlUrl &url, bool dflt) {
+	char* schema = NULL;
+	if(CURLUE_OK==curl_url_get(&url, CURLUPART_SCHEME, &schema, 0)){
+		bool https = 0 == strcmp("https",schema);
+		curl_free(schema);
+		return https;
+	} else {
+		return dflt;
+	}
+}
+
 struct CurlProxyInfo {
 	string hostAndPort;
 	string credentials;

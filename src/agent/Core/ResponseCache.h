@@ -30,12 +30,14 @@
 #include <time.h>
 #include <cassert>
 #include <cstring>
+#include <ev.h>
 #include <DataStructures/HashedStaticString.h>
-#include <ServerKit/http_parser.h>
 #include <ServerKit/CookieUtils.h>
+#include <ServerKit/HeaderTable.h>
 #include <StaticString.h>
 #include <StrIntTools/DateParsing.h>
 #include <StrIntTools/StrIntUtils.h>
+#include <Utils/Curl.h>
 
 namespace Passenger {
 
@@ -317,18 +319,16 @@ private:
 		return entry.body->expiryDate > now;
 	}
 
-	StaticString extractHostNameWithPortFromParsedUrl(struct http_parser_url &url,
-		const LString *value) const
+	string extractHostNameWithPortFromParsedUrl(CurlUrl &url, char *host) const
 	{
-		assert(url.field_set & (1 << UF_HOST));
-		if (url.field_set & (1 << UF_PORT)) {
-			unsigned int portEnd = url.field_data[UF_PORT].off + url.field_data[UF_PORT].len;
-			return StaticString(value->start->data + url.field_data[UF_HOST].off,
-				portEnd - url.field_data[UF_HOST].off);
-		} else {
-			return StaticString(value->start->data + url.field_data[UF_HOST].off,
-				url.field_data[UF_HOST].len);
-		}
+		char* port = NULL;
+		assert(CURLUE_OK==curl_url_get(&url, CURLUPART_PORT, &port, CURLU_DEFAULT_PORT));
+
+		string retVal = host;
+		retVal.push_back(':');
+		retVal.append(port);
+		curl_free(port);
+		return retVal;
 	}
 
 	void invalidateLocation(Request *req, const HashedStaticString &header) {
@@ -337,25 +337,26 @@ private:
 			return;
 		}
 
-		StaticString path;
+		string path;
 		bool https;
 		value = psg_lstr_make_contiguous(value, req->pool);
 
 		if (psg_lstr_first_byte(value) != '/') {
 			// Maybe it is a full URL. Parse the host name.
-			struct http_parser_url url;
-			int ret = http_parser_parse_url(value->start->data, value->size,
-				0, &url);
-			if (ret != 0) {
-				// Invalid URL.
-				return;
-			}
-			if (!(url.field_set & (1 << UF_HOST))) {
+			CurlUrl *url = curl_url();
+			CURLUcode ret = curl_url_set(url, CURLUPART_URL, value->start->data, 0);
+			if (ret != CURLUE_OK) {
 				// Invalid URL.
 				return;
 			}
 
-			StaticString host = extractHostNameWithPortFromParsedUrl(url, value);
+			char* curl_host = NULL;
+			if(CURLUE_OK!=curl_url_get(url, CURLUPART_PATH, &curl_host, 0)) {
+				// Invalid URL.
+				return;
+			}
+			string host = extractHostNameWithPortFromParsedUrl(*url, curl_host);
+			curl_free(curl_host);
 			if (host.size() != req->host->size) {
 				// The host names don't match.
 				return;
@@ -375,20 +376,14 @@ private:
 				return;
 			}
 
-			if (url.field_set & (1 << UF_PATH)) {
-				path = StaticString(value->start->data + url.field_data[UF_PATH].off,
-					url.field_data[UF_PATH].len);
-			} else {
-				path = P_STATIC_STRING("/");
-			}
+			char* curl_path = NULL;
+			assert(CURLUE_OK==curl_url_get(url, CURLUPART_PATH, &curl_path, 0));
+			path = curl_path;
+			curl_free(curl_path);
 
-			if (url.field_set & (1 << UF_SCHEMA)) {
-				StaticString schema(value->start->data + url.field_data[UF_SCHEMA].off,
-					url.field_data[UF_SCHEMA].len);
-				https = schema == "https";
-			} else {
-				https = req->https;
-			}
+			https = curl_url_is_https(*url, req->https);
+
+			curl_url_cleanup(url);
 		} else {
 			path = StaticString(value->start->data, value->size);
 			https = req->https;
